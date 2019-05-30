@@ -4,6 +4,7 @@ const log = require('../../util/log');
 const formatMessage = require('format-message');
 const BLE = require('../../io/ble');
 const Base64Util = require('../../util/base64-util');
+const RateLimiter = require('../../util/rateLimiter.js');
 
 
 /**
@@ -13,7 +14,9 @@ const Base64Util = require('../../util/base64-util');
 const LightPlayBLE = {
     SERVICE:'6e400001-b5a3-f393-e0a9-e50e24dcca9e',
     RX_CHARACTERISTIC:'6e400002-b5a3-f393-e0a9-e50e24dcca9e',
-    TX_CHARACTERISTIC:'6e400003-b5a3-f393-e0a9-e50e24dcca9e'
+    TX_CHARACTERISTIC:'6e400003-b5a3-f393-e0a9-e50e24dcca9e', 
+    sendInterval: 300,
+    sendRateMax: 20
 };
 
 /**
@@ -29,6 +32,17 @@ const LightPort = {
 };
 
 /**
+ * Enum for light state.
+ * @readonly
+ * @enum {string}
+ */
+const LightStatus = {
+    ON: 'on',
+    OFF: 'off',
+    FADING: 'fading'
+};
+
+/**
  * Enum for light colors.
  * @readonly
  * @enum {string}
@@ -41,8 +55,36 @@ const LightColor = {
     GREEN: 'green',
     BLUE: 'blue',
     MAGENTA: 'magenta'
-};
-    
+};    
+
+
+/**
+ * Manage status for LightPlay Light.
+ */
+class Light {
+    /**
+     * Construct a Light instance.
+     * @param {int} port - the [1,2,3] port number of this light
+     */
+    constructor () {
+        /**
+         * The port number of this light on its parent peripheral.
+         * @type {int}
+         * @private
+         */
+        //this._port = port;
+        /**
+         * The state of this light (on/off/fading)
+         * @type {string}
+         */
+        this.status = LightStatus.OFF;
+        /**
+         * The color of this light
+         * @type {string}
+         */
+        this.color = LightColor.WHITE;
+    }
+}
 
 /**
  * Manage communication with a LightPlay peripheral over a Bluetooth Low Energy client socket.
@@ -64,12 +106,28 @@ class LightPlay {
         this._extensionId = extensionId;
 
         /**
+         * The most recent state for each light.
+         */
+        this._lights = [];
+        this._lights[LightPort.ONE] = new Light();
+        this._lights[LightPort.TWO] = new Light();
+        this._lights[LightPort.THREE] = new Light();
+
+        /**
          * The Bluetooth connection socket for reading/writing peripheral data.
          * @type {BLE}
          * @private
          */
         this._ble = null;
         this._runtime.registerPeripheralExtension(extensionId, this);
+
+        /**
+         * A rate limiter utility, to help limit the rate at which we send BLE messages
+         * over the socket to Scratch Link to a maximum number of sends per second.
+         * @type {RateLimiter}
+         * @private
+         */
+        this._rateLimiter = new RateLimiter(LightPlayBLE.sendRateMax);
 
         this.disconnect = this.disconnect.bind(this);
         this._onConnect = this._onConnect.bind(this);
@@ -130,8 +188,17 @@ class LightPlay {
      * @param {Array} message - the message to write.
      * @return {Promise} - a promise result of the write operation
      */
-    send (message) {
+    send (message, useLimiter = true) {
+        
         if (!this.isConnected()) return Promise.resolve();
+
+        if (useLimiter) {
+            if (!this._rateLimiter.okayToSend()) {
+                log('send stopped');
+                return Promise.resolve();
+            }
+        }
+        log('sending');
 
         return this._ble.write(
             LightPlayBLE.SERVICE,
@@ -148,12 +215,15 @@ class LightPlay {
      * @private
      */
     _onConnect () {
-        log('onConnect')
+        
         this._ble.startNotifications(
             LightPlayBLE.SERVICE,
             LightPlayBLE.TX_CHARACTERISTIC,
             this._onMessage
         );
+
+        // reset lights
+        this.send(new Uint8Array([64, 0, 0, 0, 0, 0, 0, 0, 0]));
     }
 
     /**
@@ -165,6 +235,66 @@ class LightPlay {
         //log('onMessage: '+data);
     }
 
+
+    /**
+     * Update light status
+     */
+
+    setLightOff (port) {
+        
+        if (port == LightPort.ALL){
+            this._lights[LightPort.ONE].status = LightStatus.OFF;
+            this._lights[LightPort.TWO].status = LightStatus.OFF;
+            this._lights[LightPort.THREE].status = LightStatus.OFF;
+        } else {
+            this._lights[port].status = LightStatus.OFF;
+        }
+    }
+
+    getLightStatus (port) {
+        
+        if (port != LightPort.ALL){
+            return this._lights[port].status;
+        } else {
+            if (this._lights[LightPort.ONE].status == this._lights[LightPort.TWO].status &&
+                this._lights[LightPort.ONE].status == this._lights[LightPort.THREE].status){
+                return this._lights[LightPort.ONE].status;
+            } else {
+                return false;
+            }
+        }
+    }
+
+    setLightColor (port, color) {
+        
+        if (port == LightPort.ALL){
+
+            this._lights[LightPort.ONE].status = LightStatus.ON;
+            this._lights[LightPort.TWO].status = LightStatus.ON;
+            this._lights[LightPort.THREE].status = LightStatus.ON;
+
+            this._lights[LightPort.ONE].color = color;
+            this._lights[LightPort.TWO].color = color;
+            this._lights[LightPort.THREE].color = color;
+
+        } else {
+            this._lights[port].status = LightStatus.ON;
+            this._lights[port].color = color;
+        }
+    }
+
+    getLightColor (port) {
+        if (port != LightPort.ALL){
+            return this._lights[port].color;
+        } else {
+            if (this._lights[LightPort.ONE].color == this._lights[LightPort.TWO].color &&
+                this._lights[LightPort.ONE].color == this._lights[LightPort.THREE].color){
+                return this._lights[LightPort.ONE].color;
+            } else {
+                return false;
+            }
+        }
+    }
 }
 
 
@@ -215,49 +345,17 @@ class Scratch3LightplayBlocks {
             showStatusButton: true,
             blocks: [
                 {
-                    opcode: 'lightOn',
-                    blockType: BlockType.COMMAND,
-                    text: formatMessage({
-                        id: 'lightplay.lightOn',
-                        default: 'turn [LIGHT_ID] on',
-                        description: 'turn a light on'
-                    }),
-                    arguments: {
-                        LIGHT_ID: {
-                            type: ArgumentType.STRING,
-                            menu: 'LIGHT_ID',
-                            defaultValue: LightPort.ALL
-                        }
-                    }
-                },
-                {
-                    opcode: 'lightOff',
-                    blockType: BlockType.COMMAND,
-                    text: formatMessage({
-                        id: 'lightplay.lightOff',
-                        default: 'turn [LIGHT_ID] off',
-                        description: 'turn a light off'
-                    }),
-                    arguments: {
-                        LIGHT_ID: {
-                            type: ArgumentType.STRING,
-                            menu: 'LIGHT_ID',
-                            defaultValue: LightPort.ALL
-                        }
-                    }
-                },
-                {
                     opcode: 'setLightColor',
                     blockType: BlockType.COMMAND,
                     text: formatMessage({
                         id: 'lightplay.setLightColor',
-                        default: 'set [LIGHT_ID] color to [COLOR_ID]',
+                        default: 'set [LIGHT_PORT] color to [COLOR_ID]',
                         description: 'set a light color'
                     }),
                     arguments: {
-                        LIGHT_ID: {
+                        LIGHT_PORT: {
                             type: ArgumentType.STRING,
-                            menu: 'LIGHT_ID',
+                            menu: 'LIGHT_PORT',
                             defaultValue: LightPort.ALL
                         },
                         COLOR_ID: {
@@ -267,9 +365,25 @@ class Scratch3LightplayBlocks {
                         }
                     }
                 },    
+                {
+                    opcode: 'setLightOff',
+                    blockType: BlockType.COMMAND,
+                    text: formatMessage({
+                        id: 'lightplay.lightOff',
+                        default: 'turn [LIGHT_PORT] off',
+                        description: 'turn a light off'
+                    }),
+                    arguments: {
+                        LIGHT_PORT: {
+                            type: ArgumentType.STRING,
+                            menu: 'LIGHT_PORT',
+                            defaultValue: LightPort.ALL
+                        }
+                    }
+                },
             ],
             menus: {
-                LIGHT_ID: [
+                LIGHT_PORT: [
                     {
                         text: formatMessage({
                             id: 'lightplay.lightId.one',
@@ -365,45 +479,62 @@ class Scratch3LightplayBlocks {
         };
     }
 
-    lightOn (args) {
-
-        var port = this._getPortByte(args);
-        var message = new Uint8Array([port, 0, 0, 0, 0, 0, 0, 15, 255]);
-        return this._peripheral.send(message);
-    }
-
-    lightOff (args) {
-
-        var port = this._getPortByte(args);
-        var message = new Uint8Array([port, 0, 0, 0, 0, 0, 0, 0, 0]);
-        return this._peripheral.send(message);
-    }
-
     setLightColor (args) {
+
+        if (args.LIGHT_PORT == LightPort.ALL){
+            if (this._peripheral.getLightStatus(LightPort.ALL) == LightStatus.ON &&
+                this._peripheral.getLightColor(LightPort.ALL) == args.COLOR_ID) {
+                return; // all lights are on and same color, nothing to do
+            }
+        }
+
+        if (this._peripheral.getLightStatus(args.LIGHT_PORT) == LightStatus.ON && 
+            this._peripheral.getLightColor(args.LIGHT_PORT) == args.COLOR_ID) 
+            return; // single light is already on and same color, nothing to do
 
         var port = this._getPortByte(args);
         var color = this._getColorBytes(args);
         var message = new Uint8Array(9);
         message[0] = port;
         message.set(color, 1);
-        return this._peripheral.send(message);
+        this._peripheral.send(message).then(this._peripheral.setLightColor(args.LIGHT_PORT, args.COLOR_ID));
+
+        return new Promise(resolve => {
+            window.setTimeout(() => {
+                resolve();
+            }, LightPlayBLE.sendInterval);
+        });
     }
 
+    setLightOff (args) {
+
+        if (this._peripheral.getLightStatus(args.LIGHT_PORT) == LightStatus.OFF) return; // nothing to do
+
+        var port = this._getPortByte(args);
+        var message = new Uint8Array([port, 0, 0, 0, 0, 0, 0, 0, 0]);
+        this._peripheral.send(message).then(this._peripheral.setLightOff(args.LIGHT_PORT));
+
+        return new Promise(resolve => {
+            window.setTimeout(() => {          
+                resolve();
+            }, LightPlayBLE.sendInterval);
+        });
+    }
 
     _getPortByte (args) {
         
-        var port = 0;
+        var portByte = 0;
 
-        if(args.LIGHT_ID == LightPort.ONE){
-            port = 72;
-        } else if (args.LIGHT_ID == LightPort.TWO) {
-            port = 80;
-        } else if (args.LIGHT_ID == LightPort.THREE) {
-            port = 88;
-        } else if (args.LIGHT_ID == LightPort.ALL) {
-            port = 64;
+        if(args.LIGHT_PORT == LightPort.ONE){
+            portByte = 72;
+        } else if (args.LIGHT_PORT == LightPort.TWO) {
+            portByte = 80;
+        } else if (args.LIGHT_PORT == LightPort.THREE) {
+            portByte = 88;
+        } else if (args.LIGHT_PORT == LightPort.ALL) {
+            portByte = 64;
         }
-        return port;
+        return portByte;
     }
 
     _getColorBytes (args) {
