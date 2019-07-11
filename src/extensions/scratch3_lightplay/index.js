@@ -54,7 +54,8 @@ const LightColor = {
     YELLOW: 'yellow',
     GREEN: 'green',
     BLUE: 'blue',
-    MAGENTA: 'magenta'
+    MAGENTA: 'magenta',
+    SURPRISE: 'surprise'
 };    
 
 
@@ -224,6 +225,8 @@ class LightPlay {
 
         // reset lights
         this.send(new Uint8Array([64, 0, 0, 0, 0, 0, 0, 0, 0]));
+        // set fade speed to 2 sec
+        this.send(new Uint8Array([69, 2]));
     }
 
     /**
@@ -381,6 +384,43 @@ class Scratch3LightplayBlocks {
                         }
                     }
                 },
+                {
+                    opcode: 'fadeToColor',
+                    blockType: BlockType.COMMAND,
+                    text: formatMessage({
+                        id: 'lightplay.fadeToColor',
+                        default: 'fade [LIGHT_PORT] color to [COLOR_ID]',
+                        description: 'fade to a light color'
+                    }),
+                    arguments: {
+                        LIGHT_PORT: {
+                            type: ArgumentType.STRING,
+                            menu: 'LIGHT_PORT',
+                            defaultValue: LightPort.ALL
+                        },
+                        COLOR_ID: {
+                            type: ArgumentType.STRING,
+                            menu: 'COLOR_ID',
+                            defaultValue: LightColor.WHITE
+                        }
+                    }
+                },
+                {
+                    opcode: 'fadeOff',
+                    blockType: BlockType.COMMAND,
+                    text: formatMessage({
+                        id: 'lightplay.fadeOff',
+                        default: 'fade [LIGHT_PORT] off',
+                        description: 'fade a light off'
+                    }),
+                    arguments: {
+                        LIGHT_PORT: {
+                            type: ArgumentType.STRING,
+                            menu: 'LIGHT_PORT',
+                            defaultValue: LightPort.ALL
+                        }
+                    }
+                }, 
             ],
             menus: {
                 LIGHT_PORT: [
@@ -474,6 +514,14 @@ class Scratch3LightplayBlocks {
                         }),
                         value: LightColor.MAGENTA
                     },
+                    {
+                        text: formatMessage({
+                            id: 'lightplay.lightColor.surprise',
+                            default: 'surprise',
+                            description: ''
+                        }),
+                        value: LightColor.SURPRISE
+                    },
                 ],
             }
         };
@@ -493,11 +541,22 @@ class Scratch3LightplayBlocks {
             return; // single light is already on and same color, nothing to do
 
         var port = this._getPortByte(args);
-        var color = this._getColorBytes(args);
+
+        var color_id = args.COLOR_ID;
+        if (color_id == LightColor.SURPRISE){
+            var current_color = this._peripheral.getLightColor(args.LIGHT_PORT);
+            do {
+                var random = Math.floor(Math.random()*7);
+                color_id = Object.values(LightColor)[random];
+            } while (color_id == current_color);
+        }
+        var color_bytes = this._getColorBytes(color_id);
+        
+
         var message = new Uint8Array(9);
         message[0] = port;
-        message.set(color, 1);
-        this._peripheral.send(message).then(this._peripheral.setLightColor(args.LIGHT_PORT, args.COLOR_ID));
+        message.set(color_bytes, 1);
+        this._peripheral.send(message).then(this._peripheral.setLightColor(args.LIGHT_PORT, color_id));
 
         return new Promise(resolve => {
             window.setTimeout(() => {
@@ -511,6 +570,60 @@ class Scratch3LightplayBlocks {
         if (this._peripheral.getLightStatus(args.LIGHT_PORT) == LightStatus.OFF) return; // nothing to do
 
         var port = this._getPortByte(args);
+        var message = new Uint8Array([port, 0, 0, 0, 0, 0, 0, 0, 0]);
+        this._peripheral.send(message).then(this._peripheral.setLightOff(args.LIGHT_PORT));
+
+        return new Promise(resolve => {
+            window.setTimeout(() => {          
+                resolve();
+            }, LightPlayBLE.sendInterval);
+        });
+    }
+
+    fadeToColor (args) {
+
+        // not sure if needed for fading..
+        if (args.LIGHT_PORT == LightPort.ALL){
+            if (this._peripheral.getLightStatus(LightPort.ALL) == LightStatus.ON &&
+                this._peripheral.getLightColor(LightPort.ALL) == args.COLOR_ID) {
+                return; // all lights are on and same target color, nothing to do
+            }
+        }
+
+        if (this._peripheral.getLightStatus(args.LIGHT_PORT) == LightStatus.ON && // check if status is fading?
+            this._peripheral.getLightColor(args.LIGHT_PORT) == args.COLOR_ID) 
+            return; // single light is already on and target color, nothing to do
+
+        var port = this._getPortByte(args);
+        
+        var color_id = args.COLOR_ID;
+        if (color_id == LightColor.SURPRISE){
+            var current_color = this._peripheral.getLightColor(args.LIGHT_PORT);
+            do {
+                var random = Math.floor(Math.random()*7);
+                color_id = Object.values(LightColor)[random];
+            } while (color_id == current_color);
+        }
+        var color_bytes = this._getColorBytes(color_id);
+
+
+        var message = new Uint8Array(9);
+        message[0] = port + 2; // +2 sets the bytes for the fade command (I know it's a ugly hack)
+        message.set(color_bytes, 1);
+        this._peripheral.send(message).then(this._peripheral.setLightColor(args.LIGHT_PORT, color_id));
+
+        return new Promise(resolve => {
+            window.setTimeout(() => {
+                resolve();
+            }, LightPlayBLE.sendInterval);
+        });
+    }
+
+    fadeOff (args) {
+
+        if (this._peripheral.getLightStatus(args.LIGHT_PORT) == LightStatus.OFF) return; // nothing to do
+
+        var port = this._getPortByte(args) + 3; // +3 specifies fade out
         var message = new Uint8Array([port, 0, 0, 0, 0, 0, 0, 0, 0]);
         this._peripheral.send(message).then(this._peripheral.setLightOff(args.LIGHT_PORT));
 
@@ -537,9 +650,9 @@ class Scratch3LightplayBlocks {
         return portByte;
     }
 
-    _getColorBytes (args) {
+    _getColorBytes (color_id) {
 
-        switch (args.COLOR_ID) {
+        switch (color_id) {
             case LightColor.WHITE: return [0, 0 ,0, 0, 0, 0,15, 255];
             case LightColor.RED: return [15, 255, 0, 0 ,0, 0, 0, 0];
             case LightColor.ORANGE: return [10, 240, 4, 176 ,0, 0, 0, 0];
