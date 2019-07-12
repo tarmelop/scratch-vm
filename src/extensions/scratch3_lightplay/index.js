@@ -56,7 +56,9 @@ const LightColor = {
     BLUE: 'blue',
     MAGENTA: 'magenta',
     SURPRISE: 'surprise'
-};    
+}; 
+
+const FADE_TIME = 2; // in seconds   
 
 
 /**
@@ -225,8 +227,9 @@ class LightPlay {
 
         // reset lights
         this.send(new Uint8Array([64, 0, 0, 0, 0, 0, 0, 0, 0]));
-        // set fade speed to 2 sec
-        this.send(new Uint8Array([69, 2]));
+        
+        // set fade speed to constant
+        this.send(new Uint8Array([69, FADE_TIME]));
     }
 
     /**
@@ -615,7 +618,7 @@ class Scratch3LightplayBlocks {
         return new Promise(resolve => {
             window.setTimeout(() => {
                 resolve();
-            }, LightPlayBLE.sendInterval);
+            }, Math.max(LightPlayBLE.sendInterval, FADE_TIME * 1000));
         });
     }
 
