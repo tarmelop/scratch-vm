@@ -58,7 +58,32 @@ const LightColor = {
     SURPRISE: 'surprise'
 }; 
 
+/**
+ * Hardcoding fade time for now
+ */ 
 const FADE_TIME = 2; // in seconds   
+
+
+/*
+ * Enum for motor status.
+ * @readonly
+ * @enum {string}
+ */
+const MotorStatus = {
+    ON: 'on',
+    OFF: 'off'
+}
+
+/*
+ * Enum for motor directions.
+ * @readonly
+ * @enum {string}
+ */
+const MotorDirection = {
+    THIS_WAY: 'thisWay',
+    THAT_WAY: 'thatWay',
+    REVERSE: 'reverse'
+}
 
 
 /**
@@ -90,6 +115,28 @@ class Light {
 }
 
 /**
+ * Manage status for LightPlay Motor.
+ */
+class Motor {
+    /**
+     * Construct a Motor instance.
+     */
+    constructor () {
+        /**
+         * The state of this motor (on/off)
+         * @type {string}
+         */
+        this.status = MotorStatus.OFF;
+        /**
+         * The direction of the motor
+         * @type {string}
+         */
+        this.direction = MotorDirection.THIS_WAY;
+    }
+}
+
+
+/**
  * Manage communication with a LightPlay peripheral over a Bluetooth Low Energy client socket.
  */
 class LightPlay {
@@ -109,12 +156,14 @@ class LightPlay {
         this._extensionId = extensionId;
 
         /**
-         * The most recent state for each light.
+         * The most recent state for each light and the motor.
          */
         this._lights = [];
         this._lights[LightPort.ONE] = new Light();
         this._lights[LightPort.TWO] = new Light();
         this._lights[LightPort.THREE] = new Light();
+        this._motor = new Motor();
+
 
         /**
          * The Bluetooth connection socket for reading/writing peripheral data.
@@ -227,6 +276,9 @@ class LightPlay {
 
         // reset lights
         this.send(new Uint8Array([64, 0, 0, 0, 0, 0, 0, 0, 0]));
+
+        // stop motor
+        this.send(new Uint8Array([34]));
         
         // set fade speed to constant
         this.send(new Uint8Array([69, FADE_TIME]));
@@ -300,6 +352,33 @@ class LightPlay {
                 return false;
             }
         }
+    }
+
+    setMotorOn (direction) {
+
+        this._motor.status = MotorStatus.ON;
+
+        if (direction == MotorDirection.REVERSE){
+            if (this._motor.direction == MotorDirection.THIS_WAY){
+                this._motor.direction = MotorDirection.THAT_WAY;
+            } else {
+                this._motor.direction = MotorDirection.THIS_WAY;
+            }
+        } else {
+            this._motor.direction = direction;
+        }
+    }
+
+    getMotorStatus () {
+        return this._motor.status;
+    }
+
+    getMotorDirection () {
+        return this._motor.direction;
+    }
+
+    setMotorOff () {
+        this._motor.status = MotorStatus.OFF;
     }
 }
 
@@ -376,8 +455,8 @@ class Scratch3LightplayBlocks {
                     blockType: BlockType.COMMAND,
                     text: formatMessage({
                         id: 'lightplay.lightOff',
-                        default: 'turn [LIGHT_PORT] off',
-                        description: 'turn a light off'
+                        default: 'set [LIGHT_PORT] off',
+                        description: 'set a light off'
                     }),
                     arguments: {
                         LIGHT_PORT: {
@@ -423,7 +502,32 @@ class Scratch3LightplayBlocks {
                             defaultValue: LightPort.ALL
                         }
                     }
-                }, 
+                },
+                 {
+                    opcode: 'turnMotorOn',
+                    blockType: BlockType.COMMAND,
+                    text: formatMessage({
+                        id: 'lightplay.turnMotorOn',
+                        default: 'turn motor [MOTOR_DIRECTION]',
+                        description: 'turn motor on'
+                    }),
+                    arguments: {
+                        MOTOR_DIRECTION: {
+                            type: ArgumentType.STRING,
+                            menu: 'MOTOR_DIRECTION',
+                            defaultValue: MotorDirection.THIS_WAY
+                        }
+                    }
+                },    
+                {
+                    opcode: 'stopMotor',
+                    blockType: BlockType.COMMAND,
+                    text: formatMessage({
+                        id: 'lightplay.stopMotor',
+                        default: 'stop motor',
+                        description: 'stop the motor'
+                    }),
+                } 
             ],
             menus: {
                 LIGHT_PORT: [
@@ -526,6 +630,32 @@ class Scratch3LightplayBlocks {
                         value: LightColor.SURPRISE
                     },
                 ],
+                MOTOR_DIRECTION: [
+                    {
+                        text: formatMessage({
+                            id: 'lightplay.motorDirection.thisWay',
+                            default: 'this way',
+                            description: ''
+                        }),
+                        value: MotorDirection.THIS_WAY
+                    },
+                    {
+                        text: formatMessage({
+                            id: 'lightplay.motorDirection.thatWay',
+                            default: 'that way',
+                            description: ''
+                        }),
+                        value: MotorDirection.THAT_WAY
+                    },
+                    {
+                        text: formatMessage({
+                            id: 'lightplay.motorDirection.reverse',
+                            default: 'reverse',
+                            description: ''
+                        }),
+                        value: MotorDirection.REVERSE
+                    },
+                ]
             }
         };
     }
@@ -637,6 +767,41 @@ class Scratch3LightplayBlocks {
         });
     }
 
+    turnMotorOn (args) {
+
+        if (this._peripheral.getMotorStatus() == MotorStatus.ON && 
+            this._peripheral.getMotorDirection() == args.MOTOR_DIRECTION) return; // nothing to do
+
+        var direction = args.MOTOR_DIRECTION;
+        if (direction == MotorDirection.REVERSE){
+            if (this._peripheral.getMotorDirection() == MotorDirection.THIS_WAY){
+                direction = MotorDirection.THAT_WAY;
+            } else {
+                direction = MotorDirection.THIS_WAY;
+            }
+        }
+
+        var motorCommand = this._getMotorCommandByte(direction)
+        var message = new Uint8Array([motorCommand]);
+
+        this._peripheral.send(message).then(this._peripheral.setMotorOn(args.MOTOR_DIRECTION));
+
+    }
+
+    stopMotor () {
+
+        if (this._peripheral.getMotorStatus() == MotorStatus.OFF) return; // nothing to do
+
+        var message = new Uint8Array([34]);; // motor off
+
+        this._peripheral.send(message).then(this._peripheral.setMotorOff());
+
+    }
+
+
+
+    // Utility functions
+
     _getPortByte (args) {
         
         var portByte = 0;
@@ -663,6 +828,15 @@ class Scratch3LightplayBlocks {
             case LightColor.GREEN: return [0, 0, 15, 255 ,0, 0, 0, 0];
             case LightColor.BLUE: return [0, 0, 0, 0, 15, 255 ,0, 0];
             case LightColor.MAGENTA: return [7, 208, 0, 0, 11, 184 ,0, 0];
+        }
+    }
+
+    _getMotorCommandByte (direction) {
+        
+        switch (direction){
+            case MotorDirection.THIS_WAY: return 32;
+            case MotorDirection.THAT_WAY: return 33;
+
         }
     }
 
